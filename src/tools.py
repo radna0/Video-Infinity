@@ -66,12 +66,14 @@ class DistController(object):
         self.world_size = world_size
         self.config = config
         self.is_master = rank == 0
-        self.device = xm.xla_device()  # Use XLA device
+        self.device = torch_xla.device()
         self.init_dist()
         self.init_group()
 
     def init_dist(self):
-        print(f"Rank {self.rank}, {self.device} is running on XLA device.")
+        print(
+            f"Rank {self.rank}, {self.device} / {self.world_size} is running on XLA device."
+        )
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = str(self.config.get("master_port") or "29500")
         dist.init_process_group("xla", rank=self.rank, world_size=self.world_size)

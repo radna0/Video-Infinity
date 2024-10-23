@@ -15,35 +15,7 @@ from accelerate.utils.operations import _tpu_gather_one
 import torch
 import os
 import json
-
-
-def save_tensors_and_config(video_frames, config, base_path, file_name=None):
-    # Ensure base_path exists
-    if not os.path.exists(base_path):
-        os.makedirs(base_path)
-
-    p_config = config["pipe_configs"]
-    frames, steps, fps = p_config["num_frames"], p_config["steps"], p_config["fps"]
-
-    # Generate a file name if none is provided
-    if not file_name:
-        index = [int(each.split("_")[0]) for each in os.listdir(base_path)]
-        max_index = max(index) if index else 0
-        idx_str = str(max_index + 1).zfill(6)
-        key_info = "_".join([str(frames), str(steps), str(fps)])
-        file_name = f"{idx_str}_{key_info}"
-
-    # Save the config file
-    config_path = os.path.join(base_path, f"{file_name}.json")
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=4)
-
-    # Save the TPU tensors to a file
-    frames_file_path = os.path.join(base_path, f"{file_name}_frames.pt")
-    torch.save(video_frames, frames_file_path)
-
-    print(f"Tensors and config saved to {frames_file_path} and {config_path}")
-    return frames_file_path, config_path
+from concurrent.futures import ProcessPoolExecutor
 
 
 class DistWrapper(object):
@@ -201,12 +173,16 @@ class DistWrapper(object):
             generator=generator,
         ).frames[0]
 
+        print(
+            f"Rank {self.dist_controller.rank} finished inference. Result: {video_frames.shape}, {video_frames.device}"
+        )
+
         video_frames = torch.tensor(
             video_frames, dtype=torch.float16, device=self.dist_controller.device
         )
 
         print(
-            f"Rank {self.dist_controller.rank} finished inference. Result: {video_frames.shape}"
+            f"Rank {self.dist_controller.rank} finished inference. Result: {video_frames.shape}, {video_frames.device}"
         )
         all_frames = (
             [
@@ -216,11 +192,21 @@ class DistWrapper(object):
             if self.dist_controller.is_master
             else None
         )
-        if self.dist_controller.is_master:
-            dist.all_gather(all_frames, video_frames)
-            print(f"\n\nall_frames: {all_frames[0].shape}, {all_frames[0].device}\n\n")
+        print("World size: ", dist.group.WORLD)
 
+        # wait for all processes to finish
+        torch.cpu.synchronize()
+        dist.barrier(group=dist.group.WORLD)
+        if self.dist_controller.is_master:
+            dist.all_gather(all_frames, video_frames, group=dist.group.WORLD)
+            print(
+                f"\n\nRank {self.dist_controller.rank} all_frames: {all_frames[0].shape}, {all_frames[0].device}\n\n"
+            )
+            dist.destroy_process_group()
+
+            print(f"\n\n__________Exporting video for {prompts}__________\n\n")
             all_frames = torch.cat(all_frames, dim=0).cpu().numpy()
+
             save_generation(
                 all_frames,
                 {
